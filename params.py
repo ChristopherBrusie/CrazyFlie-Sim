@@ -7,7 +7,7 @@ GRAVITY     = 9.81           # m/s^2
 ARM_LENGTH  = 0.046          # m
 ARM_DIAG    = ARM_LENGTH * np.sqrt(2) / 2   # projected arm length for moments
 
-# Inertia tensor [kg*m^2]
+# Inertia matrix [kg*m^2]
 J = np.array([[16.571710, 0.830806, 0.718277],
               [0.830806, 16.655602, 1.800197],
               [0.718277, 1.800197, 29.261652]]) * 1e-6

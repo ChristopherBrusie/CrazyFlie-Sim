@@ -38,25 +38,24 @@ from mixer import wrench_to_pwm
 os.makedirs("figures", exist_ok=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Smooth reference trajectory (ramp with exponential profile, no discontinuity)
-# ─────────────────────────────────────────────────────────────────────────────
-def _ramp(t, t_start, t_dur, val_start, val_end):
-    """Smooth cubic ramp from val_start to val_end over [t_start, t_start+t_dur]."""
-    if t <= t_start:
-        return val_start
-    if t >= t_start + t_dur:
-        return val_end
-    s = (t - t_start) / t_dur          # s in [0, 1]
-    s_smooth = s*s*(3. - 2.*s)         # smoothstep (zero velocity at endpoints)
-    return val_start + s_smooth * (val_end - val_start)
+###################################################
+# Reference trajectory generation - with smoothed cubic ramps
+def _ramp(t, t0, dur, v0, v1):
+    """Smooth cubic (smoothstep) ramp, zero velocity at both ends."""
+    if t <= t0:       return v0
+    if t >= t0 + dur: return v1
+    s = (t - t0) / dur
+    s = s * s * (3. - 2. * s)
+    return v0 + s * (v1 - v0)
 
 def reference(t):
-    """(pd_ref, pn_ref, pe_ref) — smooth step commands, NED [m]."""
-    pd_ref = _ramp(t, 0.,  5, 0.,  -5.)    # takeoff: 4 s ramp to 1 m alt
-    pn_ref = _ramp(t, 6.,  5, 0.,   5.)    # north:   4 s ramp starting at t=8
-    pe_ref = _ramp(t, 15., 5, 0.,   5.)    # east:    4 s ramp starting at t=18
-    return pd_ref, pn_ref, pe_ref
+    """Returns (pd_ref, pn_ref, pe_ref, psi_ref) — NED [m, m, m, rad]."""
+    pd_ref  = _ramp(t,  0., 0.5,  0.,  -1.)
+    pn_ref  = _ramp(t,  8., 0.5,  0.,   2.)
+    pe_ref  = _ramp(t, 18., 0.5,  0.,   1.)
+    psi_ref = _ramp(t, 24., 2.,  0., np.pi/2.)
+    return pd_ref, pn_ref, pe_ref, psi_ref
+
 
 # def reference(t):
 #     pd_ref = -1.0 if t > 0. else 0.0
@@ -64,72 +63,80 @@ def reference(t):
 #     pe_ref = 1.0 if t > 18. else 0.0
 #     return pd_ref, pn_ref, pe_ref
 
+# yaw helper - wraps error to +/- pi
+def _wrap(err):
+    return (err + np.pi) % (2 * np.pi) - np.pi
 
-# ─────────────────────────────────────────────────────────────────────────────
+
+
+
+##############################################################
 # Controller
-# ─────────────────────────────────────────────────────────────────────────────
-# Anti-windup clamp limits (integrator state bounds)
-INT_PD_LIM  = 2.0     # [m*s]
-INT_POS_LIM = 5.0     # [m*s]
+
+# Anti-windup limits for integrators (m*s)
+INT_PD_LIM  = 2.0
+INT_POS_LIM = 5.0
 
 def compute_control(t, s):
     """
     Returns (pwm[4], F_total, L_roll, M_pitch, N_yaw, saturated).
 
-    u = -K @ error_state   (LQR regulator convention)
-    Gravity feedforward applied to altitude channel.
+    u = -K @ error_state
+    Gravity feedforward applied to altitude (hover thrust + control)
     """
     pn, pe, pd     = s[0],  s[1],  s[2]
     u_b, v_b, w_b  = s[3],  s[4],  s[5]
-    phi, theta     = s[6],  s[7]
+    phi, theta, psi= s[6],  s[7], s[8]
     p, q, r        = s[9],  s[10], s[11]
     e_int_pd       = np.clip(s[16], -INT_PD_LIM,  INT_PD_LIM)
     e_int_pn       = np.clip(s[17], -INT_POS_LIM, INT_POS_LIM)
     e_int_pe       = np.clip(s[18], -INT_POS_LIM, INT_POS_LIM)
 
-    pd_ref, pn_ref, pe_ref = reference(t)
+    pd_ref, pn_ref, pe_ref, psi_ref = reference(t)
 
-    # Altitude: error = actual - ref
+    # Altitude error = actual - ref
     e_z  = np.array([pd - pd_ref, w_b, e_int_pd])
     dF   = float(-(lqr.K_z  @ e_z).ravel()[0])
     F_cmd = P.MASS * P.GRAVITY + dF
 
-    # North/pitch
+    # North/X
     e_pn = np.array([pn - pn_ref, u_b, theta, q, e_int_pn])
     M_cmd = float(-(lqr.K_pn @ e_pn).ravel()[0])
 
-    # East/roll
+    # East/Y
     e_pe = np.array([pe - pe_ref, v_b, phi, p, e_int_pe])
     L_cmd = float(-(lqr.K_pe @ e_pe).ravel()[0])
 
-    # Yaw rate damping
-    N_cmd = float(-(lqr.K_yaw @ np.array([r])).ravel()[0])
+    # Yaw full tracking now
+    e_yaw = np.array([_wrap(psi - psi_ref), r])
+    N_cmd = float(-(lqr.K_yaw @ e_yaw).ravel()[0])
+
+
 
     pwm = wrench_to_pwm(F_cmd, L_cmd, M_cmd, N_cmd)
 
-    # Detect saturation (for anti-windup in integrator update)
+    # Detect saturation (for anti windup in integrator update)
     saturated = np.any(pwm >= 0.999) or np.any(pwm <= 0.001)
 
     return pwm, F_cmd, L_cmd, M_cmd, N_cmd, saturated
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+###############################################################
 # ODE
-# ─────────────────────────────────────────────────────────────────────────────
 def ode(t, s):
     pwm_cmd, _, _, _, _, sat = compute_control(t, s)
     xdot = f_continuous(t, s[:16], pwm_cmd)
 
-    pd_ref, pn_ref, pe_ref = reference(t)
+    pd_ref, pn_ref, pe_ref, _ = reference(t)
 
     # Integrator update: e_int_dot = (actual - ref)
-    # Anti-windup: freeze integrator if saturated AND error pushes further into sat
+    # NOTE freeze integrator if saturated AND error pushes further into sat
     ei_pd_dot = s[2] - pd_ref
     ei_pn_dot = s[0] - pn_ref
     ei_pe_dot = s[1] - pe_ref
 
     if sat:
-        # Clamp: don't let integrator grow in the winding-up direction
+        # Clamp don't let integrator grow in winding-up direction
         if abs(s[16]) >= INT_PD_LIM  and np.sign(s[16]) == np.sign(ei_pd_dot):
             ei_pd_dot = 0.
         if abs(s[17]) >= INT_POS_LIM and np.sign(s[17]) == np.sign(ei_pn_dot):
@@ -140,9 +147,9 @@ def ode(t, s):
     return np.concatenate([xdot, [ei_pd_dot, ei_pn_dot, ei_pe_dot, 0.]])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Run
-# ─────────────────────────────────────────────────────────────────────────────
+
+#########################################################################
+# run simulation / solve ode
 T_END  = 30.
 x_init = np.zeros(20)
 x_init[12:16] = P.PWM_HOVER
@@ -156,9 +163,14 @@ print(f"  Done — {len(sol.t)} steps in {time.time()-t0:.1f}s  |  {sol.message}
 t  = sol.t
 xs = sol.y.T
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Post-process
-# ─────────────────────────────────────────────────────────────────────────────
+
+
+
+######################################
+##############################################
+## Post Processing only
+
+
 pn_s    = xs[:,0];  pe_s   = xs[:,1];  pd_s   = xs[:,2]
 u_s     = xs[:,3];  v_s    = xs[:,4];  w_s    = xs[:,5]
 phi_s   = xs[:,6];  theta_s= xs[:,7];  psi_s  = xs[:,8]
@@ -168,19 +180,20 @@ alt_s   = -pd_s
 
 N = len(t)
 Fc_h = np.zeros(N); Lc_h = np.zeros(N); Mc_h = np.zeros(N); Nc_h = np.zeros(N)
-pwm_cmd_h = np.zeros((N, 4))
 for i in range(N):
-    cmd, Fc, Lc, Mc, Nc, _ = compute_control(t[i], xs[i])
-    Fc_h[i]=Fc; Lc_h[i]=Lc; Mc_h[i]=Mc; Nc_h[i]=Nc; pwm_cmd_h[i]=cmd
+    _, Fc, Lc, Mc, Nc, _ = compute_control(t[i], xs[i])
+    Fc_h[i]=Fc; Lc_h[i]=Lc; Mc_h[i]=Mc; Nc_h[i]=Nc
 
-pd_ref_a  = np.array([reference(ti)[0] for ti in t])
-pn_ref_a  = np.array([reference(ti)[1] for ti in t])
-pe_ref_a  = np.array([reference(ti)[2] for ti in t])
-alt_ref_a = -pd_ref_a
+pd_ref_a   = np.array([reference(ti)[0] for ti in t])
+pn_ref_a   = np.array([reference(ti)[1] for ti in t])
+pe_ref_a   = np.array([reference(ti)[2] for ti in t])
+psi_ref_a  = np.array([reference(ti)[3] for ti in t])
+alt_ref_a  = -pd_ref_a
 
-e_alt = alt_s  - alt_ref_a
-e_pn  = pn_s   - pn_ref_a
-e_pe  = pe_s   - pe_ref_a
+e_alt = alt_s         - alt_ref_a
+e_pn  = pn_s          - pn_ref_a
+e_pe  = pe_s          - pe_ref_a
+e_psi = np.array([_wrap(psi_s[i] - psi_ref_a[i]) for i in range(N)])
 
 ei_pd_a = xs[:,16]; ei_pn_a = xs[:,17]; ei_pe_a = xs[:,18]
 dF_a    = Fc_h - P.MASS * P.GRAVITY
@@ -189,14 +202,15 @@ pwm_pct    = pwm_act * 100.
 pwm_mean_a = pwm_pct.mean(axis=1)
 pwm_sprd_a = pwm_pct.max(axis=1) - pwm_pct.min(axis=1)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FIG 1 — Position tracking
-# ─────────────────────────────────────────────────────────────────────────────
+
+####################################################
+# Fig 1 position tracking
+
 fig1, axs = plt.subplots(3, 2, figsize=(14, 10))
 fig1.suptitle("Position Tracking — NED LQR (Crazyflie 2.1)", fontsize=14, fontweight="bold")
-pairs = [(alt_s, alt_ref_a, e_alt, "Altitude (m, up+)", "Altitude"),
-         (pn_s,  pn_ref_a,  e_pn,  "North pn (m)",       "North"),
-         (pe_s,  pe_ref_a,  e_pe,  "East pe (m)",         "East")]
+pairs = [(alt_s, alt_ref_a, e_alt, "Altitude (m↑)",  "Altitude"),
+         (pn_s,  pn_ref_a,  e_pn,  "North pn (m)",   "North"),
+         (pe_s,  pe_ref_a,  e_pe,  "East pe (m)",    "East")]
 for row,(act,ref,err,yl,tl) in enumerate(pairs):
     ax=axs[row,0]; ax.plot(t,act,"C0",lw=2,label="Actual"); ax.plot(t,ref,"C3--",lw=1.5,label="Ref")
     ax.set(ylabel=yl,title=tl); ax.legend(fontsize=8); ax.grid(True)
@@ -206,23 +220,33 @@ axs[2,0].set_xlabel("Time (s)"); axs[2,1].set_xlabel("Time (s)")
 fig1.tight_layout(); fig1.savefig("figures/fig_position.png", dpi=150)
 print("Saved figures/fig_position.png")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FIG 2 — Attitude
-# ─────────────────────────────────────────────────────────────────────────────
-fig2, axs2 = plt.subplots(2, 3, figsize=(14, 7))
+
+########################################################
+# Fig 2 Attitude
+fig2, axs2 = plt.subplots(2, 3, figsize=(14, 8))
 fig2.suptitle("Attitude & Body Rates", fontsize=13, fontweight="bold")
-for i,(sig,rl) in enumerate([(phi_s,"Roll φ (°)"),(theta_s,"Pitch θ (°)"),(psi_s,"Yaw ψ (°)")]):
-    axs2[0,i].plot(t,np.degrees(sig),[  "C2","C4","C5"][i],lw=2); axs2[0,i].axhline(0,color="k",ls="--",lw=0.8)
-    axs2[0,i].set(title=rl); axs2[0,i].grid(True)
-for i,(sig,rl) in enumerate([(p_s,"p (°/s)"),(q_s,"q (°/s)"),(r_s,"r (°/s)")]):
-    axs2[1,i].plot(t,np.degrees(sig),["C2","C4","C5"][i],lw=2); axs2[1,i].axhline(0,color="k",ls="--",lw=0.8)
-    axs2[1,i].set(xlabel="Time (s)",title=rl); axs2[1,i].grid(True)
+att_sigs  = [phi_s, theta_s, psi_s]
+att_refs  = [None,  None,  psi_ref_a]
+att_lbls  = ["Roll φ (°)", "Pitch θ (°)", "Yaw ψ (°)"]
+rate_sigs = [p_s, q_s, r_s]
+rate_lbls = ["Roll rate p (°/s)", "Pitch rate q (°/s)", "Yaw rate r (°/s)"]
+cols      = ["C2", "C4", "C5"]
+for i in range(3):
+    ax = axs2[0,i]
+    ax.plot(t, np.degrees(att_sigs[i]), cols[i], lw=2, label="Actual")
+    if att_refs[i] is not None:
+        ax.plot(t, np.degrees(att_refs[i]), "k--", lw=1.5, label="Ref")
+        ax.legend(fontsize=8)
+    ax.axhline(0, color="k", ls="--", lw=0.8); ax.set(title=att_lbls[i]); ax.grid(True)
+    axs2[1,i].plot(t, np.degrees(rate_sigs[i]), cols[i], lw=2)
+    axs2[1,i].axhline(0, color="k", ls="--", lw=0.8)
+    axs2[1,i].set(xlabel="Time (s)", title=rate_lbls[i]); axs2[1,i].grid(True)
 fig2.tight_layout(); fig2.savefig("figures/fig_attitude.png", dpi=150)
 print("Saved figures/fig_attitude.png")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FIG 3 — Motors
-# ─────────────────────────────────────────────────────────────────────────────
+
+######################################################
+# Fig 3 motors
 fig3, axs3 = plt.subplots(2,1, figsize=(12,7))
 fig3.suptitle("Motor Actuator States (PWM)", fontsize=13, fontweight="bold")
 mcols = ["#e41a1c","#377eb8","#4daf4a","#984ea3"]
@@ -239,65 +263,67 @@ axs3[1].legend(); axs3[1].grid(True)
 fig3.tight_layout(); fig3.savefig("figures/fig_motors.png", dpi=150)
 print("Saved figures/fig_motors.png")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FIG 4 — Full dashboard
-# ─────────────────────────────────────────────────────────────────────────────
+
+###############################################
+# Fig 4 dashboard with extra useful plots
 fig4 = plt.figure(figsize=(20,15))
 fig4.suptitle("Full Controller Diagnostic Dashboard — NED LQR (Crazyflie 2.1)",
               fontsize=14, fontweight="bold")
 gs = GridSpec(4, 4, figure=fig4, hspace=0.44, wspace=0.35)
 def _ax(r,c): return fig4.add_subplot(gs[r,c])
-def _plot(ax, y, col, ref=None, title=""):
-    ax.plot(t,y,col,lw=2)
-    if ref is not None: ax.plot(t,ref,"C3--",lw=1.5)
-    ax.axhline(0,color="k",ls="--",lw=0.7); ax.grid(True); ax.set(title=title)
-def _fill(ax, y, col, title=""):
-    ax.plot(t,y,col,lw=2); ax.axhline(0,color="k",ls="--",lw=0.7)
-    ax.fill_between(t,y,0,alpha=0.15,color=col); ax.grid(True); ax.set(title=title)
+def _plot(ax, y, col, ref=None, title="", ylabel=""):
+    ax.plot(t, y, col, lw=2)
+    if ref is not None: ax.plot(t, ref, "k--", lw=1.5)
+    ax.axhline(0, color="k", ls="--", lw=0.7); ax.grid(True)
+    ax.set(title=title, ylabel=ylabel)
+def _fill(ax, y, col, title="", ylabel=""):
+    ax.plot(t, y, col, lw=2); ax.axhline(0, color="k", ls="--", lw=0.7)
+    ax.fill_between(t, y, 0, alpha=0.15, color=col); ax.grid(True)
+    ax.set(title=title, ylabel=ylabel)
 
-_plot(_ax(0,0), alt_s,              "C0", alt_ref_a,       title="Altitude (m↑)")
-_fill(_ax(0,1), e_alt,              "C3",                  title="Alt Error (m)")
-_plot(_ax(0,2), ei_pd_a,            "C1",                  title="pd Integrator")
-_fill(_ax(0,3), dF_a,               "C6",                  title="ΔThrust (N)")
-_plot(_ax(1,0), pn_s,               "C0", pn_ref_a,        title="North pn (m)")
-_fill(_ax(1,1), e_pn,               "C3",                  title="North Error (m)")
-_plot(_ax(1,2), np.degrees(theta_s),"C4",                  title="Pitch θ (°)")
-_fill(_ax(1,3), Mc_h,               "C4",                  title="Pitch Moment (N·m)")
-_plot(_ax(2,0), pe_s,               "C0", pe_ref_a,        title="East pe (m)")
-_fill(_ax(2,1), e_pe,               "C3",                  title="East Error (m)")
-_plot(_ax(2,2), np.degrees(phi_s),  "C2",                  title="Roll φ (°)")
-_fill(_ax(2,3), Lc_h,               "C2",                  title="Roll Moment (N·m)")
-_plot(_ax(3,0), np.degrees(psi_s),  "C5",                  title="Yaw ψ (°)")
-_plot(_ax(3,1), np.degrees(r_s),    "C5",                  title="Yaw rate r (°/s)")
-_fill(_ax(3,2), Nc_h,               "C5",                  title="Yaw Moment (N·m)")
+_plot(_ax(0,0), alt_s,                  "C0", alt_ref_a,          title="Altitude (m↑)")
+_fill(_ax(0,1), e_alt,                  "C3",                     title="Alt Error (m)")
+_plot(_ax(0,2), ei_pd_a,                "C1",                     title="pd Integrator")
+_fill(_ax(0,3), dF_a,                   "C6",                     title="ΔThrust (N)")
+_plot(_ax(1,0), pn_s,                   "C0", pn_ref_a,           title="North pn (m)")
+_fill(_ax(1,1), e_pn,                   "C3",                     title="North Error (m)")
+_plot(_ax(1,2), np.degrees(theta_s),    "C4",                     title="Pitch θ (°)")
+_fill(_ax(1,3), Mc_h,                   "C4",                     title="Pitch Moment (N·m)")
+_plot(_ax(2,0), pe_s,                   "C0", pe_ref_a,           title="East pe (m)")
+_fill(_ax(2,1), e_pe,                   "C3",                     title="East Error (m)")
+_plot(_ax(2,2), np.degrees(phi_s),      "C2",                     title="Roll φ (°)")
+_fill(_ax(2,3), Lc_h,                   "C2",                     title="Roll Moment (N·m)")
+_plot(_ax(3,0), np.degrees(psi_s),      "C5", np.degrees(psi_ref_a), title="Yaw ψ (°)")
+_fill(_ax(3,1), np.degrees(e_psi),      "C5",                     title="Yaw Error (°)")
+_fill(_ax(3,2), Nc_h,                   "C5",                     title="Yaw Moment (N·m)")
 ax_pw = _ax(3,3)
-ax_pw.plot(t,pwm_mean_a,"k",lw=2,label="Mean")
-ax_pw.fill_between(t,pwm_mean_a-pwm_sprd_a/2,pwm_mean_a+pwm_sprd_a/2,alpha=0.25,color="steelblue",label="Spread")
-ax_pw.axhline(P.PWM_HOVER*100,color="gray",ls="--",lw=1.2)
+ax_pw.plot(t, pwm_mean_a, "k", lw=2, label="Mean")
+ax_pw.fill_between(t, pwm_mean_a-pwm_sprd_a/2, pwm_mean_a+pwm_sprd_a/2,
+                   alpha=0.25, color="steelblue", label="Spread")
+ax_pw.axhline(P.PWM_HOVER*100, color="gray", ls="--", lw=1.2)
 ax_pw.set(title="Motor PWM mean±spread"); ax_pw.legend(fontsize=7); ax_pw.grid(True)
 for r,lbl in enumerate(["ALTITUDE","FORWARD (pn)","LATERAL (pe)","YAW"]):
     fig4.add_subplot(gs[r,0]).set_ylabel(lbl, fontsize=10, fontweight="bold")
 fig4.savefig("figures/fig_dashboard.png", dpi=150)
 print("Saved figures/fig_dashboard.png")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FIG 5 — 3D path
-# ─────────────────────────────────────────────────────────────────────────────
+
+
+##################################################
+# fig 5 3D path history
+
 fig5 = plt.figure(figsize=(9,7))
 ax5 = fig5.add_subplot(111, projection="3d")
 sc = ax5.scatter(pe_s, pn_s, alt_s, c=t, cmap="plasma", s=3)
 plt.colorbar(sc, ax=ax5, label="Time (s)", shrink=0.6)
-wps = [(0.,0.,0,"Start"),(0.,0.,1,"1m alt"),(2.,0.,1,"pn=2m"),(2.,1.,1,"pe=1m")]
-for wp_pn,wp_pe,wp_z,lbl in wps:
-    ax5.scatter(wp_pe,wp_pn,wp_z,s=140,zorder=5,edgecolors="k",facecolors="yellow")
-    ax5.text(wp_pe+0.03,wp_pn+0.03,wp_z+0.05,lbl,fontsize=9)
-ax5.set(xlabel="East (m)",ylabel="North (m)",zlabel="Alt (m)",title="3-D Flight Path [colour=time]")
+ax5.set(xlabel="East (m)", ylabel="North (m)", zlabel="Alt (m)",
+        title="3-D Flight Path  [colour = time]")
 fig5.tight_layout(); fig5.savefig("figures/fig_3d_path.png", dpi=150)
 print("Saved figures/fig_3d_path.png")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FIG 6 — Stability margins
-# ─────────────────────────────────────────────────────────────────────────────
+##########################################################################
+# Fig 6 Stability Margins
+
 import control as ctrl
 fig6, axs6 = plt.subplots(2, 4, figsize=(18,7))
 fig6.suptitle("Open-Loop Bode — Stability Margins", fontsize=13, fontweight="bold")
@@ -323,9 +349,8 @@ _bode(axs6[0,3],axs6[1,3], lqr.A_yaw, lqr.B_yaw, lqr.K_yaw, "Yaw rate")
 fig6.tight_layout(); fig6.savefig("figures/fig_stability_margins.png", dpi=150)
 print("Saved figures/fig_stability_margins.png")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FIG 7 — 3D Pose snapshot panel
-# ─────────────────────────────────────────────────────────────────────────────
+
+############################################################################
 def _R(phi,theta,psi):
     cp,sp=np.cos(phi),np.sin(phi); ct,st=np.cos(theta),np.sin(theta); cy,sy=np.cos(psi),np.sin(psi)
     return np.array([[ct*cy,sy*sp*ct-cp*sy,cp*sy*ct+sp*sy],
@@ -338,9 +363,8 @@ mb = np.array([[ dg,-dg,-dg, dg],[ dg, dg,-dg,-dg],[0,0,0,0]])  # motor body off
 
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FIG 8 — 3D Animation
-# ─────────────────────────────────────────────────────────────────────────────
+############################################################################
+# Fig 8 Animation (live window)
 from matplotlib.animation import FuncAnimation, PillowWriter
 matplotlib.use("QtAgg")
 
@@ -356,7 +380,7 @@ arm1_line, = ax_anim.plot([], [], [], 'k-', lw=3)
 arm2_line, = ax_anim.plot([], [], [], 'k-', lw=3)
 motors,    = ax_anim.plot([], [], [], 'o', markersize=6, color='#e41a1c')
 
-# Target ~30 FPS for playback
+# Target 30 FPS playback
 sim_dt = np.mean(np.diff(t))
 anim_fps = 30
 stride = max(1, int((1.0 / anim_fps) / sim_dt))

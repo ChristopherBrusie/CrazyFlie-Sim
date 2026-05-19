@@ -78,6 +78,14 @@ Q_yaw = np.array([[300.]])
 R_yaw = np.array([[1.]])
 K_yaw, _, E_yaw = control.lqr(A_yaw, B_yaw, Q_yaw, R_yaw)
 
+A_yaw = np.array([[0., 1.],
+                  [0., 0.]], float)
+B_yaw = np.array([[0.],
+                  [1./J[2,2]]], float)
+Q_yaw = np.diag([200., 30.])
+R_yaw = np.array([[1.]])
+K_yaw, _, E_yaw = control.lqr(A_yaw, B_yaw, Q_yaw, R_yaw)
+
 if __name__ == "__main__":
     np.set_printoptions(precision=5, suppress=True)
     print(f"K_DZ={K_DZ:.4f},  K_DU={K_DU:.4f}")
