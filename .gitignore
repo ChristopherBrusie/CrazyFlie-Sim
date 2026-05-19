@@ -1,10 +1,65 @@
 # Python-generated files
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
+installdocs/
+*.manifest
+*.spec
 
 # Virtual environments
-.venv
+.venv/
+venv/
+ENV/
+env/
+
+# UV / package manager cache
+.uv/
+
+# Package metadata
+pip-wheel-metadata/
+*.egg-info/
+.installed.cfg
+
+# Test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+cover/
+coverage.xml
+nosetests.xml
+
+# Mypy
+.mypy_cache/
+.dmypy.json
+.dmypy/
+
+# Editor / system files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Python language server
+.python-version
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Documentation builds
+docs/_build/
+
+# Optional local env files
+.env
+.env.*
+
+# Misc
+*.log
