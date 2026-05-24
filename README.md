@@ -6,6 +6,27 @@
 - waypoint_following.py: example of different guidance laws for dubin bank-to-turn aircraft (NLGL, Vector Field, PLOS, carrot-chasing)
 
 
+
+crazyflie_sim/
+│
+├── params.py
+├── dynamics.py
+├── mixer.py
+├── lqr_control.py
+│
+├── trajectory/
+│   ├── __init__.py
+│   ├── base.py         ← NEW: Trajectory ABC with reference() interface
+│   ├── waypoint.py     ← NEW: WaypointTrajectory + hover_then_waypoints()
+│   └── collocation.py  ← NEW: solve_collocation() + CollocationTrajectory
+│
+├── controllers/
+│   ├── __init__.py
+│   └── lqr_tracker.py  ← NEW: LQRTracker class (stateful, integrators inside)
+│
+└── sim.py              ← MODIFIED: now ~30 lines of wiring, all logic extracted
+
+
 Drone motor ordering and directions:
 ![drone motor order + directions](figures/image.png)
 

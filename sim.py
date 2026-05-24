@@ -12,11 +12,6 @@ State (20,):
   [18]    e_int_pe = integral(pe - pe_ref) dt
   [19]    pad
 
-Reference trajectory (smooth ramp — avoids step-command overshoot):
-  Altitude:  0 -> 1 m  (pd: 0 -> -1 m) over 3 s, starting t=0
-  North:     0 -> 2 m  over 3 s, starting t=8 s
-  East:      0 -> 1 m  over 3 s, starting t=18 s
-
 Anti-windup: integrator clamped when actuators saturate.
 """
 
@@ -40,6 +35,7 @@ os.makedirs("figures", exist_ok=True)
 
 ###################################################
 # Reference trajectory generation - with smoothed cubic ramps
+# (discontinuity of pure step input causes instability)
 def _ramp(t, t0, dur, v0, v1):
     """Smooth cubic (smoothstep) ramp, zero velocity at both ends."""
     if t <= t0:       return v0
@@ -50,10 +46,11 @@ def _ramp(t, t0, dur, v0, v1):
 
 def reference(t):
     """Returns (pd_ref, pn_ref, pe_ref, psi_ref) — NED [m, m, m, rad]."""
-    pd_ref  = _ramp(t,  0., 0.5,  0.,  -1.)
-    pn_ref  = _ramp(t,  8., 0.5,  0.,   2.)
-    pe_ref  = _ramp(t, 18., 0.5,  0.,   1.)
-    psi_ref = _ramp(t, 24., 2.,  0., np.pi/2.)
+    pd_ref  = _ramp(t,  0., 0.5,  0.,  -3.)
+    pn_ref  = _ramp(t,  8., 0.5,  0.,   3.)
+    pe_ref  = _ramp(t, 16, 0.5,  0.,   3.)
+    #psi_ref = _ramp(t, 22., 2.,  0., np.pi/2.)
+    psi_ref = 0
     return pd_ref, pn_ref, pe_ref, psi_ref
 
 
@@ -61,7 +58,8 @@ def reference(t):
 #     pd_ref = -1.0 if t > 0. else 0.0
 #     pn_ref = 2.0 if t > 8. else 0.0
 #     pe_ref = 1.0 if t > 18. else 0.0
-#     return pd_ref, pn_ref, pe_ref
+#     psi_ref = np.pi/2. if t > 24. else 0.0
+#     return pd_ref, pn_ref, pe_ref, psi_ref
 
 # yaw helper - wraps error to +/- pi
 def _wrap(err):
@@ -270,7 +268,11 @@ fig4 = plt.figure(figsize=(20,15))
 fig4.suptitle("Full Controller Diagnostic Dashboard — NED LQR (Crazyflie 2.1)",
               fontsize=14, fontweight="bold")
 gs = GridSpec(4, 4, figure=fig4, hspace=0.44, wspace=0.35)
-def _ax(r,c): return fig4.add_subplot(gs[r,c])
+_ax_cache = {}
+def _ax(r,c):
+    if (r,c) not in _ax_cache:
+        _ax_cache[(r,c)] = fig4.add_subplot(gs[r,c])
+    return _ax_cache[(r,c)]
 def _plot(ax, y, col, ref=None, title="", ylabel=""):
     ax.plot(t, y, col, lw=2)
     if ref is not None: ax.plot(t, ref, "k--", lw=1.5)
@@ -303,7 +305,7 @@ ax_pw.fill_between(t, pwm_mean_a-pwm_sprd_a/2, pwm_mean_a+pwm_sprd_a/2,
 ax_pw.axhline(P.PWM_HOVER*100, color="gray", ls="--", lw=1.2)
 ax_pw.set(title="Motor PWM mean±spread"); ax_pw.legend(fontsize=7); ax_pw.grid(True)
 for r,lbl in enumerate(["ALTITUDE","FORWARD (pn)","LATERAL (pe)","YAW"]):
-    fig4.add_subplot(gs[r,0]).set_ylabel(lbl, fontsize=10, fontweight="bold")
+    _ax(r,0).set_ylabel(lbl, fontsize=10, fontweight="bold")
 fig4.savefig("figures/fig_dashboard.png", dpi=150)
 print("Saved figures/fig_dashboard.png")
 
@@ -321,6 +323,8 @@ ax5.set(xlabel="East (m)", ylabel="North (m)", zlabel="Alt (m)",
 fig5.tight_layout(); fig5.savefig("figures/fig_3d_path.png", dpi=150)
 print("Saved figures/fig_3d_path.png")
 
+
+
 ##########################################################################
 # Fig 6 Stability Margins
 
@@ -329,7 +333,7 @@ fig6, axs6 = plt.subplots(2, 4, figsize=(18,7))
 fig6.suptitle("Open-Loop Bode — Stability Margins", fontsize=13, fontweight="bold")
 def _bode(ax_m, ax_p, A, B, K, title):
     try:
-        sys_ol = ctrl.ss(A, B, K, np.zeros((1, K.shape[1])))
+        sys_ol = ctrl.ss(A, B, K, np.zeros((1, 1)))
         om = np.logspace(-2, 4, 1000)
         mag, phase, om_out = ctrl.bode(sys_ol, om, plot=False)
         mdb = 20*np.log10(np.squeeze(mag)); ph = np.degrees(np.squeeze(phase))
