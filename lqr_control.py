@@ -55,7 +55,7 @@ A_pn = np.array([[0.,    1.,        0., 0., 0.],
 B_pn = np.array([[0.], [0.], [0.], [1./J[1,1]], [0.]], float)
 
 Q_pn = np.diag([50., 20., 800., 20., 1.])
-R_pn = np.array([[3e5]])
+R_pn = np.array([[3e2]])
 K_pn, _, E_pn = control.lqr(A_pn, B_pn, Q_pn, R_pn)
 
 # ── East / Roll ───────────────────────────────────────────────────────────────
@@ -68,7 +68,7 @@ A_pe = np.array([[0.,    1.,       0., 0., 0.],
 B_pe = np.array([[0.], [0.], [0.], [1./J[0,0]], [0.]], float)
 
 Q_pe = np.diag([50., 20., 500., 20., 1.])
-R_pe = np.array([[3e5]])
+R_pe = np.array([[3e2]])
 K_pe, _, E_pe = control.lqr(A_pe, B_pe, Q_pe, R_pe)
 
 # ── Yaw rate ─────────────────────────────────────────────────────────────────

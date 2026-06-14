@@ -1,30 +1,50 @@
-- params.py: contains physical parameters of the drone and other helpful constants
-- mixer.py: motor mixing algorithm, nonlinear map from commanded wrench -> motor PWMs
-- dynamics.py: contains full continuous nonlinear dynamics of the drone, and hover linearization
-- lqr_control.py: derivation of feedback gains using LQR with integral action
+
 - sim.py: runs the simulation via RK45 solver, post-processing for plots/animation.
-- waypoint_following.py: example of different guidance laws for dubin bank-to-turn aircraft (NLGL, Vector Field, PLOS, carrot-chasing)
+
+
+## params.py
+- physical parameters of the drone itself, with other helpful constants
+
+## mixer.py
+- nonlinear motor mixing algorithm
+- maps from commanded wrench to motor PWM values
+- Saturation strategy (in order):
+  1. Shift all forces to keep max ≤ F_MOTOR_MAX (preserves moment ratios).
+  2. Shift all forces to keep min ≥ 0 (may push max over limit temporarily).
+  3. If spread > physical range, scale moments down around midpoint.
+  4. Hard clip to [0, F_MOTOR_MAX].
+
+## dynamics.py
+- contains the full continuous nonlinear dynamics of the 16-state model as ```f_continuous()```
+- computes a hover trim linearization for LQR derivation.
+
+## lqr_control.py
+- an error-state position controller with integral terms
+- uses the hover-linearized model for derivation
+- offers North, East, Down, and Yaw control
+
+## wind.py
+- a Dryden-style stochastic wind disturbance model
+- currently only applies NED forces, no torques.
+- how it works:
+    - passes white noise through a low-pass filter: $\dot{w} = -\frac{w}{\tau} + \frac{\sigma}{\tau} \cdot \eta(t)$
+    - where $\eta(t)$ is white noise, $\tau = 0.3s$ is the time constant, and $\sigma$ is the target standard deviation.
+    - $\sigma$ controls how hard the wind blows
+    - $\tau$ controls how slowly it changes
+
+## postprocess.py
+- loads ```sim_out.npz``` produced by ```sim.py```
+- creates usefull figures and visualizations from the simulation output.
+
+## sim.py
+- closed-loop simulation via RK45 solver
+- computes control, feeds to mixer, computes dynamics, injects wind.
+
+#### waypoint_following.py
+- an unrelated example of different guidance laws for dubin bank-to-turn aircraft (NLGL, Vector Field, PLOS, carrot-chasing)
 
 
 
-crazyflie_sim/
-│
-├── params.py
-├── dynamics.py
-├── mixer.py
-├── lqr_control.py
-│
-├── trajectory/
-│   ├── __init__.py
-│   ├── base.py         ← NEW: Trajectory ABC with reference() interface
-│   ├── waypoint.py     ← NEW: WaypointTrajectory + hover_then_waypoints()
-│   └── collocation.py  ← NEW: solve_collocation() + CollocationTrajectory
-│
-├── controllers/
-│   ├── __init__.py
-│   └── lqr_tracker.py  ← NEW: LQRTracker class (stateful, integrators inside)
-│
-└── sim.py              ← MODIFIED: now ~30 lines of wiring, all logic extracted
 
 
 Drone motor ordering and directions:
